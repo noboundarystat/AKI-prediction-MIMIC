@@ -63,6 +63,9 @@ Feature modules under `src/features/`:
 - `fluids_preicu_48h.py` – fluid balance  
 - `notes.py` – clinical text features (optional)  
 
+Features for CKD survival modeling are built in a similar way, under
+ckd_survivial directory.
+
 ---
 
 ## 4) Imputation
