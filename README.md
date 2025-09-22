@@ -123,6 +123,8 @@ python -m src.imputation
 
 # 6) Train model (example: XGBoost)
 python -m src.train_xgboost --input features_ckd.parquet --out-prefix artifacts/xgb_ckd/xgb_ckd
+```
+---
 
 ## 8) Notes & Caveats
 
@@ -132,8 +134,10 @@ python -m src.train_xgboost --input features_ckd.parquet --out-prefix artifacts/
 * **Memory**: CHARTEVENTS and LABEVENTS are large → use chunked I/O for extensions  
 * **Advanced ICU signals** (CO, PAP, VT, VE, GCS) not currently included; can be added by extending `itemids.py`, `compile_data.py`, and `vitals_preicu_48h.py`  
 
-## 9) 📂 Source Tree (abridged)
+---
 
+## 9) 📂 Source Tree (abridged)
+```bash
 src/
   compile_data.py
   compute_target_admissions.py
@@ -151,3 +155,4 @@ src/
   utils/
     io.py, itemids.py, time_windows.py, meds_maps.py,
     dx_maps.py, agg.py
+```
