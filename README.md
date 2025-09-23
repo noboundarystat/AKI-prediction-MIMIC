@@ -151,6 +151,7 @@ src/
   train_logreg.py / train_rf.py / train_xgboost.py
   train_dnn.py / train_selfattn.py / train_dcn.py
   train_deepsurv_time_to_ckd.py
+  RF_Hstatistics.Rmd
   features/
     demographics.py, insurance.py, comorbidities.py,
     meds_procedures_history.py, vitals_preicu_48h.py,

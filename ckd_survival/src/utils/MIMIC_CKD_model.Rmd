@@ -1,0 +1,128 @@
+---
+title: "Competing Risk Model"
+author: "Rui Feng"
+date: "2025-09-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Overview
+This R Markdown fits and validates survival models for CKD after AKI using MIMIC-IV (development) and MIMIC-III (external validation). It includes Cox models (single-event) and Fine–Gray competing-risk models, plus time-dependent performance via riskRegression::Score.
+
+Data assumptions
+# mimic4.ckd: development dataset (MIMIC-IV)
+# mimic3.ckd: external validation dataset (MIMIC-III)
+
+Time-to-event variables:
+# time_days = follow-up time
+# is_ckd    = 1 if CKD event, 0 if censored (for single-event Cox)
+# event_code = {0=censor, 1=CKD (event of interest), 2+=competing events (e.g., death)}
+
+Predictors include age, dem_sex_M, comorbidities cmb_xxx, marital/insurance, and recent labs (e.g., labs7d_xxx), meds (e.g., hx30d_diuretics_any), etc.
+
+```{Install Packages}
+# Packages (install if needed):
+# install.packages(c("survival","riskRegression","prodlim","cmprsk","data.table"))
+
+library(survival)
+library(riskRegression)
+library(prodlim)
+library(cmprsk)
+library(data.table)
+
+set.seed(20250921)
+
+```
+
+#------ Cox proportional hazards (CKD as a single event)
+
+```{r}
+# Baseline Cox model
+cox1 <- coxph(
+  Surv(time_days, is_ckd) ~ age + dem_sex_M + cmb_htn + cmb_dm + cmb_hf +
+    cmb_cancer + cmb_infection + cmb_liver +
+    dem_mar_DIVORCED + dem_mar_WIDOWED + ins_UNKNOWN,
+  data = mimic4.ckd, x = TRUE, y = TRUE
+)
+summary(cox1)
+
+# PH assumption check
+ph1 <- cox.zph(cox1)
+print(ph1)     # prefer non-significant global test
+# plot(ph1)    # optional diagnostics
+
+# Extended Cox model with labs/meds/interactions as available
+cox2 <- coxph(
+  Surv(time_days, is_ckd) ~ age + cmb_htn + cmb_dm + cmb_hf + cmb_cancer +
+    cmb_infection + cmb_liver + dem_mar_DIVORCED + dem_mar_WIDOWED + ins_UNKNOWN +
+    labs7d_hgb_mean + labs7d_plt_mean + labs7d_bun_mean +
+    hx30d_diuretics_any + cmb_infectionM + labs7d_plt_meanM + labs7d_creatinine_meanM,
+  data = mimic4.ckd, x = TRUE, y = TRUE
+)
+summary(cox2)
+
+ph2 <- cox.zph(cox2)
+print(ph2)
+# plot(ph2)    # optional diagnostics
+```
+
+External validation (time-dependent C and Brier) on MIMIC-III
+```{r}
+times_years <- 1:10
+times <- 365 * times_years
+
+# Default IPCW censoring model
+sc_cox <- Score(
+  object   = list(Cox1 = cox1, Cox2 = cox2),
+  formula  = Surv(time_days, is_ckd) ~ 1,
+  data     = mimic3.ckd,             # external validation
+  times    = times,
+  metrics  = c("AUC","Brier"),
+  conf.int = FALSE
+)
+```
+
+Competing-risks (Fine–Gray) via riskRegression::FGR
+
+```{r}
+# Baseline Fine–Gray model
+m_baseline <- FGR(
+  Hist(time_days, event_code) ~ age + dem_sex_M + cmb_htn + cmb_dm + cmb_hf +
+    cmb_cancer + cmb_infection + cmb_liver +
+    dem_mar_DIVORCED + dem_mar_WIDOWED + ins_UNKNOWN,
+  data = mimic4.ckd,
+  cause = 1
+)
+
+# Extended Fine–Gray model
+m_extended <- FGR(
+  Hist(time_days, event_code) ~ age + cmb_htn + cmb_dm + cmb_hf + cmb_cancer +
+    cmb_infection + cmb_liver + dem_mar_DIVORCED + dem_mar_WIDOWED + ins_UNKNOWN +
+    labs7d_hgb_mean + labs7d_plt_mean + labs7d_bun_mean +
+    hx30d_diuretics_any + cmb_infectionM + labs7d_plt_meanM + labs7d_creatinine_meanM,
+  data = mimic4.ckd,
+  cause = 1
+)
+
+summary(m_extended)
+```
+
+Fine–Gray performance (AUC(t), Brier(t))
+
+```{r}
+times <- 365 * (1:10)
+
+# Evaluate on development or external set; here: external MIMIC-III
+sc_fg <- Score(
+  object   = list(Base = m_baseline, Full = m_extended),
+  formula  = Hist(time_days, event_code) ~ 1,
+  data     = mimic3.ckd,     # swap to mimic4.ckd to report apparent performance
+  cause    = 1,
+  times    = times,
+  metrics  = c("AUC","Brier"),
+  conf.int = FALSE
+)
+```
+
