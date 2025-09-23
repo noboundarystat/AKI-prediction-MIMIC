@@ -1,0 +1,246 @@
+----
+title: "H-Statistics for Random Forest: AKI Interaction Analysis"
+author: "Rui Feng"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+This R Markdown computes Friedman–Popescu H-statistics for a Random Forest AKI model, with:
+#1) stratified train/test split
+#2) class-weighted ranger training
+#3) ROC/AUC
+#4) global/pairwise interaction via iml 
+#5) formal H-statistics via hstats, highlighting sex × predictor interactions.
+
+Assumptions
+
+# Input file is a tab-delimited table with an is_aki outcome and predictors.
+# We subset to the MIMIC-IV split (column version == "mimic4").
+# The final column index of is_aki is not assumed; we select by name.
+
+```{r}
+# install if missing
+install_if_missing <- function(pkgs){
+  to_install <- pkgs[!pkgs %in% rownames(installed.packages())]
+  if(length(to_install)) install.packages(to_install)
+}
+install_if_missing(c("ranger","pROC","dplyr","tibble","stringr","scales",
+                     "ggplot2","iml","future","hstats","readr"))
+library(ranger)
+library(pROC)
+library(dplyr)
+library(tibble)
+library(stringr)
+library(scales)
+library(ggplot2)
+library(iml)
+library(future)
+library(hstats)
+
+set.seed(9202025)
+options(stringsAsFactors = FALSE)
+
+```
+
+Read Data
+
+```{r}
+# Build full path
+fpath <- file.path(params$data_path, params$data_file)
+
+# Read tab-delimited file
+mimic.aki0 <- read.table(fpath, header = TRUE, sep = "\t", check.names = FALSE)
+
+mimic4 <- subset(mimic.aki0, version == "mimic4")
+
+# Make outcome factor with explicit levels
+mimic4$is_aki <- factor(mimic4$is_aki, levels = c(0,1), labels = c("No","Yes"))
+```
+
+Stratified Train/Test Split (80/20)
+
+```{r}
+set.seed(9202025)
+i_yes <- which(mimic4$is_aki == "Yes")
+i_no  <- which(mimic4$is_aki == "No")
+
+trn_idx <- c(
+  sample(i_yes, floor(0.8 * length(i_yes))),
+  sample(i_no,  floor(0.8 * length(i_no)))
+)
+trn_idx <- sort(trn_idx)
+
+trn <- mimic4[trn_idx, ]
+tst <- mimic4[-trn_idx, ]
+
+# Check class balance
+table_train <- table(trn$is_aki)
+table_test  <- table(tst$is_aki)
+list(train_class = table_train, test_class = table_test)
+3) Class Weights (Imbalance Handling)
+{r
+Copy code
+tab <- table(trn$is_aki)
+# Up-weight minority class "Yes"
+w_yes <- as.numeric(tab["No"] / tab["Yes"])
+class_wts <- c("No" = 1, "Yes" = w_yes)
+class_wts
+```
+
+Train Random Forest (ranger)
+
+```{r}
+set.seed(9202025)
+
+# Derive a formula on all columns
+rf_formula <- as.formula(paste("is_aki ~", paste(setdiff(names(trn), "is_aki"), collapse = " + ")))
+
+rf.model <- ranger(
+  rf_formula,
+  data            = trn,
+  probability     = TRUE,                       # predict class probabilities
+  num.trees       = 1000,
+  mtry            = max(1, floor(sqrt(ncol(trn) - 1))),
+  min.node.size   = 100,
+  importance      = "impurity",
+  class.weights   = class_wts,
+  seed            = 9202025
+)
+
+rf.model
+```
+
+ Predict on Test & ROC/AUC
+ 
+```{r}
+# Probability of AKI = "Yes"
+pred <- predict(rf.model, data = tst)$predictions
+phat <- pred[, "Yes"]
+
+roc_obj <- roc(response = tst$is_aki, predictor = phat, levels = c("No","Yes"), direction = "<")
+auc_val <- as.numeric(auc(roc_obj))
+
+list(AUC = auc_val)
+```
+
+ Global & Pairwise Interactions via iml
+ 
+```{r}
+# iml expects a predict function returning a numeric vector of probabilities for the positive class
+pred_fun <- function(model, newdata) {
+  as.numeric(predict(model, data = newdata)$predictions[, "Yes"])
+}
+
+# Build Predictor object (remove outcome column by name)
+x_cols <- setdiff(names(tst), "is_aki")
+
+predictor <- Predictor$new(
+  model            = rf.model,
+  data             = tst[, x_cols, drop = FALSE],
+  y                = tst$is_aki,
+  predict.function = pred_fun,
+  type             = "prob"
+)
+
+# Overall interaction strength (Friedman H, aggregated)
+interaction_global <- Interaction$new(predictor)
+interaction_global$results
+# Visualize global interaction strengths
+interaction_global$plot()
+```
+
+Memory-Constrained Option (Subsampling)
+
+```{r}
+# Subsample to balance memory vs signal (adjust counts as needed)
+set.seed(9202025)
+y <- tst$is_aki
+i_no  <- which(y == "No")
+i_yes <- which(y == "Yes")
+
+i_no_s  <- sample(i_no,  min(4000, length(i_no)))
+i_yes_s <- sample(i_yes, min(1000, length(i_yes)))
+idx <- c(i_no_s, i_yes_s)
+
+predictor_small <- Predictor$new(
+  model            = rf.model,
+  data             = tst[idx, x_cols, drop = FALSE],
+  y                = y[idx],
+  predict.function = pred_fun,
+  type             = "prob"
+)
+
+interaction_small <- Interaction$new(predictor_small, grid.size = 20)
+interaction_small$results
+interaction_small$plot()
+```
+
+Formal H-Statistics via hstats
+
+```{r}
+# hstats computes H1 (per-feature) and H2 (pairwise)
+X_small <- tst[, x_cols, drop = FALSE]
+
+hs <- hstats(
+  object = rf.model,
+  X      = X_small,
+  S      = 2,          # up to 2-way interactions
+  pairwise_m = 50L     # number of grid points (tune as needed)
+)
+
+# Summaries
+H1 <- summary(hs, type = "H1")  # per-feature
+H2 <- summary(hs, type = "H2")  # pairwise (tidy form)
+
+head(H1)
+head(H2)
+```
+
+Extract Sex × Predictor Interactions and Plot
+
+```{r}
+# Keep pairs that include "dem_sex_M"
+H2_sex <- H2 %>%
+  filter(grepl("dem_sex_M", pair)) %>%
+  arrange(desc(H2))
+
+# Build a partner label: remove "dem_sex_M:" or ":dem_sex_M"
+H2_sex <- H2_sex %>%
+  mutate(partner = str_replace(pair, "^dem_sex_M:|:dem_sex_M$", ""))
+
+# Plot as horizontal bar chart
+ggplot(H2_sex, aes(x = reorder(partner, H2), y = H2)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = expression("Interaction importance (H"^2*")"),
+    title = "Sex (Male) × Predictor Interactions (H\u00b2)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title.y = element_blank()
+  )
+```
+
+Parallel/Memory Settings (optional)
+
+```{r}
+# Compute in the main session
+plan(sequential)
+
+# Or allow multisession (Windows-safe); adjust memory if needed
+options(future.globals.maxSize = 20 * 1024^3)  # 20 GB
+plan(multisession)
+plot(pressure)
+```
