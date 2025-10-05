@@ -136,7 +136,7 @@ python -m src.train_xgboost --input features_ckd.parquet --out-prefix artifacts/
 * **Regex safety**: meds regex uses non-capturing groups to avoid `str.contains` warnings  
 * **Memory**: CHARTEVENTS and LABEVENTS are large → use chunked I/O for extensions  
 * **Advanced ICU signals** (CO, PAP, VT, VE, GCS) not currently included; can be added by extending `itemids.py`, `compile_data.py`, and `vitals_preicu_48h.py`  
-
+* **H statistics** were calculated using R; check R markdown `RF_Hstatistics.Rmd`
 ---
 
 ## 9) 📂 Source Tree (abridged)
