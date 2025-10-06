@@ -1,12 +1,14 @@
-# Incident AKI / CKD Survival Modeling
+# AKI and subsequent CKD Modeling
 
-This repo builds an **incident AKI/CKD prediction cohort** from MIMIC-III/IV, engineers features, and trains multiple machine learning and survival models.  
+This repo builds an **AKI/CKD prediction cohort** from MIMIC-III/IV, engineers features, and trains multiple machine learning and survival models.  
 
 It supports:  
 
 * Cohort construction with admission-level and patient-level de-duplication  
 * Exclusion of primary diagnoses and lab-based removal of pre-admission AKI  
-* Feature engineering across demographics, insurance, comorbidities, medications/procedures, **pre-ICU vitals (48h)**, **pre-ICU labs (7d)**, and **fluids (48h)**  
+* Feature extraction of demographics, insurance, comorbidities, medications/procedures
+* Feature engineering of **pre-ICU vitals (48h)**, **pre-ICU labs (7d)**, **fluids (48h)** , and **clinical notes (7d)** for AKI
+* Feature engineering of **pre-event labs (90d)** and **per-event procedures (90d)** for CKD and death 
 * Flexible imputation (3-tier by version, gender, age ±2; adds *_missing flags)  
 * Training/evaluation of classical ML, deep models, and survival models (CoxPH, DeepSurv)  
 * External validation: train on MIMIC-IV, test on MIMIC-III  
