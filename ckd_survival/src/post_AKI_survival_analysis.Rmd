@@ -1,0 +1,657 @@
+---
+title: "Post-AKI Survival Analysis"
+author: "Rui Feng"
+date: "7/25/2026"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+# Overview
+
+This markdown prepares the post-AKI cohorts, describes CKD-free survival and overall survival, performs Elastic Net variable selection, fits competing-risk regression models for CKD and mortality, evaluates model performance in MIMIC-IV, externally validates the models in MIMIC-III, and produces time-dependent AUC and Brier-score plots with 95% confidence limits.
+
+# Packages
+
+```{r packages}
+library(arrow)          # Read Parquet files
+library(survival)       # Surv() and Kaplan-Meier estimation
+library(glmnet)         # Penalized Cox regression
+library(glmnetUtils)    # Formula interface and cva.glmnet()
+library(riskRegression) # Fine-Gray models, Score(), AUC, and Brier scores
+library(prodlim)        # Hist() competing-risk outcome
+library(dplyr)          # Data manipulation
+library(tidyr)          # Data reshaping
+library(purrr)          # Functional programming helpers
+library(data.table)     # Efficient data handling used by riskRegression
+library(ggplot2)        # Graphics
+library(patchwork)      # Multi-panel figures
+library(scales)         # Percentage axis labels
+```
+
+# Analysis settings
+
+```{r analysis-settings}
+set.seed(20260627)
+
+analysis_file <- "features_ckd_imputed.parquet"
+follow_up_times <- 90 * seq_len(40)
+sex_colors <- c("Female" = "red", "Male" = "blue")
+```
+
+# Import and prepare the post-AKI cohort
+The event code is defined as 0 for censoring, 1 for CKD, and 2 for death. Post-CKD events are combined with CKD. The original code removed five reference-category columns by position; those positions are retained here for reproducibility, although removing variables by name is preferable when names are available.
+
+```{r import-preprocess}
+mimic_ckd <- read_parquet(analysis_file) %>%
+  as.data.frame()
+
+# Review event distributions before recoding.
+with(
+  mimic_ckd,
+  table(event_type, version, time_days >= 90, useNA = "ifany")
+)
+
+# Combine PostCKD with CKD and create a competing-risk event code.
+mimic_ckd <- mimic_ckd %>%
+  mutate(
+    is_ckd = if_else(is_postckd %in% TRUE, 1, is_ckd),
+    event_type = if_else(event_type == "PostCKD", "CKD", event_type),
+    event_code = case_when(
+      event_type == "CKD"   ~ 1L,
+      event_type == "Death" ~ 2L,
+      TRUE                  ~ 0L
+    )
+  )
+
+with(mimic_ckd, table(is_ckd, event_code, useNA = "ifany"))
+
+# Remove reference-category columns used in the original analysis.
+reference_columns <- c(26, 30, 37, 39, 46)
+if (max(reference_columns) <= ncol(mimic_ckd)) {
+  mimic_ckd <- mimic_ckd[, -reference_columns, drop = FALSE]
+}
+
+# Separate the development and external-validation cohorts.
+mimic3_ckd <- mimic_ckd %>% filter(version == "mimic3")
+mimic4_ckd <- mimic_ckd %>% filter(version == "mimic4")
+
+cat("MIMIC-III post-AKI cohort:", nrow(mimic3_ckd), "patients\n")
+cat("MIMIC-IV post-AKI cohort:", nrow(mimic4_ckd), "patients\n")
+```
+
+# Kaplan-Meier curves by sex
+
+K-M curves compare CKD-free survival and overall survival by sex across MIMIC-III and MIMIC-IV. For CKD, death is treated as censoring in this descriptive Kaplan-Meier analysis; the formal CKD models below account for death as a competing event.
+
+```{r kaplan-meier, fig.width=11, fig.height=5}
+km_ckd3 <- survfit(
+  Surv(time_days / 365.25, event_type == "CKD") ~ gender,
+  data = mimic3_ckd
+)
+km_ckd4 <- survfit(
+  Surv(time_days / 365.25, event_type == "CKD") ~ gender,
+  data = mimic4_ckd
+)
+
+km_death3 <- survfit(
+  Surv(time_days / 365.25, is_death) ~ gender,
+  data = mimic3_ckd
+)
+km_death4 <- survfit(
+  Surv(time_days / 365.25, is_death) ~ gender,
+  data = mimic4_ckd
+)
+
+x_limits <- c(90 / 365.25, 10)
+par(mfrow = c(1, 2), mar = c(4.5, 4.5, 2, 1))
+
+plot(
+  km_ckd3,
+  col = unname(sex_colors), lty = 1, lwd = 2,
+  conf.int = FALSE, mark.time = FALSE,
+  xlab = "Years since AKI admission",
+  ylab = "Probability of remaining CKD-free",
+  main = "CKD after AKI",
+  xlim = x_limits
+)
+lines(
+  km_ckd4,
+  col = unname(sex_colors), lty = 3, lwd = 2,
+  conf.int = FALSE, mark.time = FALSE
+)
+legend(
+  "bottomleft",
+  legend = c(
+    "MIMIC-III Female", "MIMIC-III Male",
+    "MIMIC-IV Female", "MIMIC-IV Male"
+  ),
+  col = c("red", "blue", "red", "blue"),
+  lty = c(1, 1, 3, 3), lwd = 2,
+  bty = "n", cex = 0.85
+)
+
+plot(
+  km_death3,
+  col = unname(sex_colors), lty = 1, lwd = 2,
+  conf.int = FALSE, mark.time = FALSE,
+  xlab = "Years since AKI admission",
+  ylab = "Probability of survival",
+  main = "Death after AKI",
+  xlim = x_limits,
+  ylim = c(0, 1)
+)
+lines(
+  km_death4,
+  col = unname(sex_colors), lty = 3, lwd = 2,
+  conf.int = FALSE, mark.time = FALSE
+)
+legend(
+  "topright",
+  legend = c(
+    "MIMIC-III Female", "MIMIC-III Male",
+    "MIMIC-IV Female", "MIMIC-IV Male"
+  ),
+  col = c("red", "blue", "red", "blue"),
+  lty = c(1, 1, 3, 3), lwd = 2,
+  bty = "n", cex = 0.85
+)
+
+par(mfrow = c(1, 1))
+```
+
+# Construct candidate predictors and sex interactions
+
+The original analysis selected baseline variables and laboratory summary. It then created interactions between sex and all candidate predictors except the sex indicator itself.
+
+```{r feature-construction}
+prepare_model_data <- function(data) {
+  n_markers <- 11
+  n_repeats <- 9
+
+  laboratory_columns <-
+    44 + rep(seq_len(n_markers) - 1, each = 1) * n_repeats +
+    rep(3, n_markers)
+
+  selected_columns <- c(18:42, laboratory_columns)
+
+  if (max(selected_columns) > ncol(data)) {
+    stop("One or more selected column positions exceed the number of columns in the dataset.")
+  }
+
+  predictors <- data[, selected_columns, drop = FALSE]
+  predictors <- predictors[, -(19:20), drop = FALSE]
+
+  # The 12th selected predictor is the male-sex indicator in the source data.
+  sex_position <- 12
+  if (sex_position > ncol(predictors)) {
+    stop("The expected sex indicator was not found at position 12.")
+  }
+
+  interaction_terms <- predictors[, -sex_position, drop = FALSE]
+  interaction_terms <- sweep(
+    as.matrix(interaction_terms),
+    MARGIN = 1,
+    STATS = predictors[[sex_position]],
+    FUN = "*"
+  ) %>%
+    as.data.frame()
+
+  names(interaction_terms) <- paste0(names(interaction_terms), "M")
+
+  bind_cols(
+    data %>% select(time_days, event_code),
+    predictors,
+    interaction_terms
+  )
+}
+
+mimic4_model <- prepare_model_data(mimic4_ckd)
+mimic3_model <- prepare_model_data(mimic3_ckd)
+```
+
+# Elastic Net variable selection
+
+Elastic Net Cox models are used to screen candidate main effects and sex interactions separately for CKD and mortality. The alpha parameter is searched using cross-validated Harrell's C statistic. The final alpha and lambda values match those selected in the original analysis.
+
+## CKD variable selection
+
+```{r elastic-net-ckd}
+alpha_grid_ckd <- seq(0, 0.1, length.out = 11)
+
+cv_ckd <- cva.glmnet(
+  Surv(time_days, event_code == 1) ~ .,
+  data = mimic4_model,
+  family = "cox",
+  alpha = alpha_grid_ckd,
+  nfolds = 10,
+  type.measure = "C"
+)
+
+plot(cv_ckd)
+
+elastic_ckd <- glmnet(
+  Surv(time_days, event_code == 1) ~ .,
+  data = mimic4_model,
+  family = "cox",
+  alpha = 0.02,
+  lambda = exp(-1.5)
+)
+
+ckd_coefficients <- as.matrix(coef(elastic_ckd))
+selected_ckd <- rownames(ckd_coefficients)[ckd_coefficients[, 1] != 0]
+selected_ckd
+```
+
+## Mortality variable selection
+
+```{r elastic-net-death}
+alpha_grid_death <- seq(0, 0.1, length.out = 21)
+
+cv_death <- cva.glmnet(
+  Surv(time_days, event_code == 2) ~ .,
+  data = mimic4_model,
+  family = "cox",
+  alpha = alpha_grid_death,
+  nfolds = 20,
+  type.measure = "C"
+)
+
+plot(cv_death)
+
+elastic_death <- glmnet(
+  Surv(time_days, event_code == 2) ~ .,
+  data = mimic4_model,
+  family = "cox",
+  alpha = 0.02,
+  lambda = exp(-1)
+)
+
+death_coefficients <- as.matrix(coef(elastic_death))
+selected_death <- rownames(death_coefficients)[death_coefficients[, 1] != 0]
+selected_death
+```
+
+# Competing-risk models for CKD after AKI
+
+Fine-Gray regression estimates subdistribution hazard ratios for CKD while treating death as a competing event. The baseline model includes demographic and comorbidity predictors. The extended model adds laboratory measures and sex-predictor interactions.
+
+```{r fine-gray-ckd}
+ckd_baseline <- FGR(
+  Hist(time_days, event_code) ~
+    age + cmb_htn + cmb_dm + cmb_cad + cmb_hf + cmb_liver +
+    dem_sex_M + dem_mar_WIDOWED,
+  data = mimic4_model,
+  cause = 1
+)
+
+ckd_extended <- FGR(
+  Hist(time_days, event_code) ~
+    age + cmb_htn + cmb_dm + cmb_cad + cmb_hf + cmb_liver +
+    dem_sex_M + dem_mar_WIDOWED +
+    labs90d_bun_mean_90d + labs90d_lactate_mean_90d +
+    labs90d_ph_mean_90d + dem_race_BLACKM +
+    labs90d_bun_mean_90dM + labs90d_creatinine_mean_90dM,
+  data = mimic4_model,
+  cause = 1
+)
+
+summary(ckd_baseline)
+summary(ckd_extended)
+```
+
+# Evaluate CKD models
+
+MIMIC-IV is used for model development and internal cross-validation. MIMIC-III is used as an external validation cohort without refitting the models.
+
+```{r evaluate-ckd}
+set.seed(20260627)
+
+score_ckd_dev <- Score(
+  object = list(Base = ckd_baseline, Full = ckd_extended),
+  formula = Hist(time_days, event_code) ~ 1,
+  data = mimic4_model,
+  cause = 1,
+  times = follow_up_times,
+  metrics = c("AUC", "Brier"),
+  conf.int = TRUE,
+  contrasts = TRUE,
+  split.method = "cv5",
+  B = 50,
+  cens.model = "km",
+  null.model = TRUE
+)
+
+score_ckd_val <- Score(
+  object = list(Base = ckd_baseline, Full = ckd_extended),
+  formula = Hist(time_days, event_code) ~ 1,
+  data = mimic3_model,
+  cause = 1,
+  times = follow_up_times,
+  metrics = c("AUC", "Brier"),
+  conf.int = TRUE,
+  contrasts = TRUE,
+  split.method = "none",
+  cens.model = "km",
+  null.model = TRUE
+)
+
+plotAUC(score_ckd_val)
+plotBrier(score_ckd_val)
+```
+
+# Competing-risk models for death after AKI
+
+For the mortality analysis, death is the event of interest and CKD is treated as the competing event. The extended model adds laboratory variables and a heart-failure-by-sex interaction.
+
+```{r fine-gray-death}
+death_baseline <- FGR(
+  Hist(time_days, event_code) ~
+    age + cmb_htn + cmb_dm + cmb_hf + cmb_copd + cmb_cancer +
+    cmb_infection + cmb_liver + cmb_cerebrovasc + cmb_obesity +
+    dem_sex_M + dem_race_BLACK + dem_race_OTHER + dem_mar_UNK,
+  data = mimic4_model,
+  cause = 2
+)
+
+death_extended <- FGR(
+  Hist(time_days, event_code) ~
+    age + cmb_htn + cmb_dm + cmb_hf + cmb_copd + cmb_cancer +
+    cmb_infection + cmb_liver + cmb_cerebrovasc + cmb_obesity +
+    dem_sex_M + dem_race_BLACK + dem_race_OTHER + dem_mar_UNK +
+    labs90d_wbc_mean_90d + labs90d_hgb_mean_90d +
+    labs90d_plt_mean_90d + labs90d_potassium_mean_90d +
+    labs90d_creatinine_mean_90d + labs90d_bicarbonate_mean_90d +
+    labs90d_lactate_mean_90d + cmb_hfM,
+  data = mimic4_model,
+  cause = 2
+)
+
+summary(death_baseline)
+summary(death_extended)
+```
+
+# Evaluate mortality models
+
+```{r evaluate-death}
+set.seed(20260627)
+
+score_death_dev <- Score(
+  object = list(Base = death_baseline, Full = death_extended),
+  formula = Hist(time_days, event_code) ~ 1,
+  data = mimic4_model,
+  cause = 2,
+  times = follow_up_times,
+  metrics = c("AUC", "Brier"),
+  conf.int = TRUE,
+  contrasts = TRUE,
+  split.method = "cv5",
+  B = 50,
+  cens.model = "km",
+  null.model = TRUE
+)
+
+score_death_val <- Score(
+  object = list(Base = death_baseline, Full = death_extended),
+  formula = Hist(time_days, event_code) ~ 1,
+  data = mimic3_model,
+  cause = 2,
+  times = follow_up_times,
+  metrics = c("AUC", "Brier"),
+  conf.int = TRUE,
+  contrasts = TRUE,
+  split.method = "none",
+  cens.model = "km",
+  null.model = TRUE
+)
+
+plotAUC(score_death_val)
+plotBrier(score_death_val)
+```
+
+# Save fitted model-performance objects
+
+```{r save-models}
+saveRDS(score_ckd_dev,   "score_ckd_mimic4.rds")
+saveRDS(score_ckd_val,   "score_ckd_mimic3.rds")
+saveRDS(score_death_dev, "score_death_mimic4.rds")
+saveRDS(score_death_val, "score_death_mimic3.rds")
+```
+
+# Prepare performance estimates and confidence limits
+
+The helper functions accommodate minor differences in confidence-limit column names across versions of `riskRegression`.
+
+```{r tidy-score-functions}
+find_column <- function(data, candidates, label) {
+  matched <- intersect(candidates, names(data))
+  if (length(matched) == 0) {
+    stop(
+      label, " column was not found. Available columns: ",
+      paste(names(data), collapse = ", ")
+    )
+  }
+  matched[[1]]
+}
+
+standardize_model_label <- function(x) {
+  case_when(
+    grepl("^Null", x, ignore.case = TRUE) ~ "Null",
+    grepl("^Base", x, ignore.case = TRUE) ~ "Base",
+    grepl("^Full", x, ignore.case = TRUE) ~ "Full",
+    TRUE ~ as.character(x)
+  )
+}
+
+tidy_score_metric <- function(score_object, dataset_name, metric) {
+  metric <- match.arg(metric, c("AUC", "Brier"))
+  score_table <- as.data.frame(score_object[[metric]]$score)
+
+  time_column <- find_column(score_table, c("times", "time"), "Time")
+  lower_column <- find_column(
+    score_table,
+    c("lower", "lower.95", "lower95", "ci.lower"),
+    "Lower confidence limit"
+  )
+  upper_column <- find_column(
+    score_table,
+    c("upper", "upper.95", "upper95", "ci.upper"),
+    "Upper confidence limit"
+  )
+
+  value_column <- if (metric == "AUC") "AUC" else "Brier"
+
+  score_table %>%
+    transmute(
+      Dataset = dataset_name,
+      Model = standardize_model_label(as.character(model)),
+      times = .data[[time_column]],
+      estimate = as.numeric(.data[[value_column]]),
+      lower = pmax(as.numeric(.data[[lower_column]]), 0),
+      upper = pmin(as.numeric(.data[[upper_column]]), 1),
+      time_years = times / 365.25
+    ) %>%
+    filter(
+      is.finite(estimate),
+      is.finite(lower),
+      is.finite(upper)
+    )
+}
+
+combine_performance <- function(development_score, validation_score, metric) {
+  bind_rows(
+    tidy_score_metric(development_score, "MIMIC-IV (D)", metric),
+    tidy_score_metric(validation_score, "MIMIC-III (V)", metric)
+  ) %>%
+    mutate(
+      Dataset = factor(
+        Dataset,
+        levels = c("MIMIC-IV (D)", "MIMIC-III (V)")
+      )
+    )
+}
+```
+
+```{r build-performance-data}
+ckd_auc <- combine_performance(score_ckd_dev, score_ckd_val, "AUC") %>%
+  filter(Model %in% c("Base", "Full")) %>%
+  mutate(Model = factor(Model, levels = c("Base", "Full")))
+
+ckd_brier <- combine_performance(score_ckd_dev, score_ckd_val, "Brier") %>%
+  filter(Model %in% c("Null", "Base", "Full")) %>%
+  mutate(Model = factor(Model, levels = c("Null", "Base", "Full")))
+
+death_auc <- combine_performance(score_death_dev, score_death_val, "AUC") %>%
+  filter(Model %in% c("Base", "Full")) %>%
+  mutate(Model = factor(Model, levels = c("Base", "Full")))
+
+death_brier <- combine_performance(score_death_dev, score_death_val, "Brier") %>%
+  filter(Model %in% c("Null", "Base", "Full")) %>%
+  mutate(Model = factor(Model, levels = c("Null", "Base", "Full")))
+
+max_years <- ceiling(
+  max(
+    c(
+      ckd_auc$time_years,
+      ckd_brier$time_years,
+      death_auc$time_years,
+      death_brier$time_years
+    ),
+    na.rm = TRUE
+  )
+)
+year_breaks <- seq(0, max_years, by = 1)
+```
+
+# Plot time-dependent AUC and Brier scores
+
+Thin outer lines represent the lower and upper 95% confidence limits. Model type is encoded by color and dataset by line type.
+
+```{r performance-plot-function}
+auc_palette <- c("Base" = "#1b9e77", "Full" = "purple")
+brier_palette <- c(
+  "Null" = "grey60",
+  "Base" = "#1b9e77",
+  "Full" = "purple"
+)
+dataset_linetypes <- c(
+  "MIMIC-IV (D)" = "solid",
+  "MIMIC-III (V)" = "dashed"
+)
+
+plot_performance <- function(
+    data,
+    y_label,
+    palette,
+    y_limits = NULL,
+    y_breaks = waiver(),
+    show_legend = TRUE,
+    percent_axis = FALSE) {
+
+  plot_object <- ggplot(
+    data,
+    aes(
+      x = time_years,
+      y = estimate,
+      color = Model,
+      linetype = Dataset,
+      group = interaction(Model, Dataset)
+    )
+  ) +
+    geom_line(aes(y = lower), linewidth = 0.35) +
+    geom_line(aes(y = upper), linewidth = 0.35) +
+    geom_line(linewidth = 1) +
+    scale_color_manual(values = palette, drop = FALSE) +
+    scale_linetype_manual(values = dataset_linetypes) +
+    scale_x_continuous(
+      breaks = year_breaks,
+      labels = year_breaks,
+      limits = c(0, max_years)
+    ) +
+    labs(x = "Years", y = y_label, title = NULL) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = if (show_legend) "bottom" else "none",
+      legend.title = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+  if (percent_axis) {
+    plot_object <- plot_object +
+      scale_y_continuous(
+        limits = y_limits,
+        breaks = y_breaks,
+        labels = percent_format(accuracy = 1),
+        expand = expansion(mult = c(0, 0.02))
+      )
+  } else {
+    plot_object <- plot_object +
+      scale_y_continuous(
+        limits = y_limits,
+        breaks = y_breaks,
+        expand = expansion(mult = c(0, 0.02))
+      )
+  }
+
+  plot_object
+}
+```
+
+```{r four-panel-performance-figure, fig.width=12, fig.height=9}
+ckd_auc_plot <- plot_performance(
+  ckd_auc,
+  y_label = "Time-dependent AUC",
+  palette = auc_palette,
+  y_limits = c(0.3, 1.0),
+  y_breaks = seq(0.3, 1.0, by = 0.1),
+  show_legend = TRUE,
+  percent_axis = TRUE
+)
+
+ckd_brier_plot <- plot_performance(
+  ckd_brier,
+  y_label = "Brier score",
+  palette = brier_palette,
+  y_limits = c(0, max(ckd_brier$upper, na.rm = TRUE) * 1.05),
+  show_legend = FALSE
+)
+
+death_auc_plot <- plot_performance(
+  death_auc,
+  y_label = "Time-dependent AUC",
+  palette = auc_palette,
+  y_limits = c(0.6, 0.9),
+  y_breaks = seq(0.6, 0.9, by = 0.1),
+  show_legend = TRUE,
+  percent_axis = TRUE
+)
+
+death_brier_plot <- plot_performance(
+  death_brier,
+  y_label = "Brier score",
+  palette = brier_palette,
+  y_limits = c(0, max(death_brier$upper, na.rm = TRUE) * 1.05),
+  show_legend = FALSE
+)
+
+(
+  (ckd_auc_plot | ckd_brier_plot) /
+  (death_auc_plot | death_brier_plot)
+) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(face = "bold", size = 13))
+```
+
+# Reproducibility information
+
+```{r session-info}
+sessionInfo()
+```
