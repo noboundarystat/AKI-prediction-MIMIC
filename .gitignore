@@ -1,0 +1,30 @@
+# Data files
+*.parquet
+*.csv
+
+# Model weights
+*.pt
+*.joblib
+*.pkl
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.DS_Store
+
+# Large data
+data.pkl
+*.zip
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Pipeline run outputs (metrics, predictions, model dumps) -- code only, no results
+# (*.csv/*.parquet/*.joblib above already cover most of these; these cover the rest)
+/artifacts/
+/ckd_survival_run/
+*.metrics.json
+*.meta.json
+*.summary.txt
+*.features.txt

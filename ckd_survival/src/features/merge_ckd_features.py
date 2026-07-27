@@ -64,6 +64,15 @@ def main():
     # Clean column names
     df = clean_columns(df)
 
+    # Binary event indicators expected by training scripts
+    # is_ckd: preserve from targets if already set (e.g. lab-CKD sensitivity),
+    # otherwise derive from event_type (covers CKD, PostCKD, and LabCKD variants)
+    if "is_ckd" not in df.columns:
+        df["is_ckd"] = (df["event_type"].isin(["CKD", "PostCKD", "LabCKD"])).astype(int)
+    df["is_postckd"]  = (df["event_type"] == "PostCKD").astype(int)
+    df["is_death"]    = (df["event_type"] == "Death").astype(int)
+    df["is_censored"] = (df["event_type"] == "Censor").astype(int)
+
     # Save outputs
     os.makedirs(args.outdir, exist_ok=True)
     out_parquet = os.path.join(args.outdir, "features_ckd.parquet")

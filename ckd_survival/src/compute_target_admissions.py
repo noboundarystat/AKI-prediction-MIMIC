@@ -148,7 +148,8 @@ def compute_targets(data_dict: Dict, outdir: str, dedup_mode: str = "patient", k
     df_patients = data_dict["patients"].copy()
     df_admissions = data_dict["admissions"].copy()
     df_diagnosis = data_dict["diagnosis"].copy()
-    df_edstays = pd.read_csv('../../data/mimic-iv-ed-2.2/ed/edstays.csv.gz').copy()
+    _ed_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data', 'mimic-iv-ed-2.2', 'ed', 'edstays.csv.gz')
+    df_edstays = pd.read_csv(_ed_path).copy()
 
     # patch admissions with ED deaths
     death_hadm_ids = df_edstays[df_edstays['disposition'] == 'EXPIRED']['hadm_id'].unique()

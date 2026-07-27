@@ -53,14 +53,14 @@ def make_event_windows(df_target, admissions):
                                     window_end=event_time - pd.Timedelta(days=lo)))
 
         # Special: censor → last discharge
-        if row["event_type"]=="Censored":
+        if row["event_type"]=="Censor":
             hadms = admissions[admissions.subject_id==sid]
             if hadms.empty:
                 continue
             last_row = hadms.sort_values("dischtime").iloc[-1]
             hadm_id = last_row["hadm_id"]
             event_time = last_row["dischtime"]
-            out.append(dict(version=version, subject_id=sid, event_type="Censored",
+            out.append(dict(version=version, subject_id=sid, event_type="Censor",
                             event_hadm_id=hadm_id,
                             window="lastobs",
                             window_start=pd.NaT, window_end=event_time))

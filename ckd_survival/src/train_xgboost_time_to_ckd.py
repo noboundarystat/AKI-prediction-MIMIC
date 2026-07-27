@@ -65,22 +65,55 @@ def groups_split_masks(n: int, groups: np.ndarray, test_size: float, val_size: f
     return train_mask, val_mask, test_mask
 
 
-def concordance_index(event_times, predicted_scores, event_observed):
-    """Compute C-index (Harrell’s concordance index)."""
-    n = 0
+def concordance_index(event_times, predicted_scores, event_observed, chunk_size=2000):
+    """
+    Harrell's concordance index (vectorized, memory-chunked).
+
+    A pair (i, j) is admissible only when the relative ordering of true
+    failure times is actually knowable:
+      - both had events (admissible whenever times differ), or
+      - exactly one had an event, and the *other's* observed (censoring)
+        time is >= that event's time -- i.e. censoring happened at or
+        after the event, so we know the censored subject failed no
+        earlier than the event.
+    A pair with one early-censored subject and one much-later event is
+    NOT admissible, since we cannot know whether the censored subject
+    would have failed before or after that event. (Previous versions of
+    this function admitted such pairs whenever either subject had an
+    event, which is not Harrell's definition and produces a severe
+    downward bias in cohorts with heavy early/short-follow-up censoring.)
+    """
+    t = np.asarray(event_times, dtype=float)
+    s = np.asarray(predicted_scores, dtype=float)
+    e = np.asarray(event_observed).astype(bool)
+    n = len(t)
+    if n < 2:
+        return np.nan
+
     n_conc = 0.0
-    for i in range(len(event_times)):
-        for j in range(i + 1, len(event_times)):
-            if event_observed[i] == 1 or event_observed[j] == 1:
-                t_i, t_j = event_times[i], event_times[j]
-                s_i, s_j = predicted_scores[i], predicted_scores[j]
-                if t_i != t_j:
-                    n += 1
-                    if (t_i < t_j and s_i > s_j) or (t_j < t_i and s_j > s_i):
-                        n_conc += 1
-                    elif s_i == s_j:
-                        n_conc += 0.5
-    return n_conc / n if n > 0 else np.nan
+    n_adm = 0
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        ti = t[start:end, None]; si = s[start:end, None]; ei = e[start:end, None]
+        tj = t[None, :];         sj = s[None, :];         ej = e[None, :]
+        upper = np.arange(start, end)[:, None] < np.arange(n)[None, :]
+
+        both_event = ei & ej
+        one_event = ei ^ ej
+        i_only = ei & ~ej
+        j_only = ej & ~ei
+
+        adm_ee = both_event & (ti != tj)
+        adm_ec = one_event & ((i_only & (tj >= ti)) | (j_only & (ti >= tj)))
+        admissible = (adm_ee | adm_ec) & upper
+
+        conc = admissible & (((ti < tj) & (si > sj)) | ((tj < ti) & (sj > si)))
+        tie = admissible & (si == sj)
+
+        n_adm += int(admissible.sum())
+        n_conc += float(conc.sum()) + 0.5 * float(tie.sum())
+
+    return n_conc / n_adm if n_adm > 0 else np.nan
 
 
 def horizon_binary_eval(time, event, score, horizon_days: float):
@@ -137,7 +170,7 @@ def main():
         "version", "subject_id", "event_hadm_id", "index_admit",
         "ckd_event_hadm_id", "postckd_event_hadm_id", "death_event_hadm_id",
         "time_to_ckd", "time_to_postckd", "time_to_death",
-        "is_ckd", "is_postckd", "is_death", "is_censored", "time_days"
+        "is_ckd", "is_postckd", "is_death", "is_censored", "time_days", "censor_time"
     ])
 
     # XGB hyperparams
@@ -170,7 +203,7 @@ def main():
                                               dataset_col=args.dataset_col, max_null_rate=args.max_null_rate)
 
     # Auto-exclude leakage
-    auto_exclude = {"time_days", "cmb_ckd"}
+    auto_exclude = {"time_days", "time_days_kdigo", "time_days_original", "hours_to_onset", "kdigo_found", "cmb_ckd"}
     exclude = set(args.exclude_cols) | auto_exclude
     feature_cols = [c for c in feature_cols if c not in exclude]
 

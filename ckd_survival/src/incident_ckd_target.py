@@ -119,6 +119,26 @@ def main():
     df_wide = pd.DataFrame(rows)
     df_surv = pd.DataFrame(surv)
 
+    # Exclude CKD/PostCKD events within 90 days of AKI (too soon to be incident CKD)
+    is_ckd_postckd = df_surv["event_type"].isin(["CKD", "PostCKD"])
+    excl_ckd = is_ckd_postckd & (
+        (df_surv["time_days"] < 90) |
+        df_surv["time_days"].isna() |
+        (df_surv["time_days"] <= 0)
+    )
+    # Exclude any patient with no post-admission follow-up (time_days <= 0), regardless of event type
+    excl_no_fu = (~is_ckd_postckd) & (
+        df_surv["time_days"].isna() | (df_surv["time_days"] <= 0)
+    )
+    excl_mask = excl_ckd | excl_no_fu
+    excl_sids = set(df_surv.loc[excl_mask, "subject_id"])
+    before = len(df_surv)
+    df_surv = df_surv[~df_surv["subject_id"].isin(excl_sids)]
+    df_wide = df_wide[~df_wide["subject_id"].isin(excl_sids)]
+    n_ckd_excl = excl_ckd.sum()
+    n_nofu_excl = excl_no_fu.sum()
+    print(f"CKD survival: excluded {n_ckd_excl:,} (CKD/ESRD <90d) + {n_nofu_excl:,} (no follow-up, time<=0) = {before - len(df_surv):,} total, {len(df_surv):,} remaining")
+
     # Save
     os.makedirs(args.outdir, exist_ok=True)
     out_wide = os.path.join(args.outdir,"incident_ckd_patient.csv")
