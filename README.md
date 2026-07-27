@@ -211,6 +211,7 @@ See `run_ckd_survival.sh` for the equivalent CKD/death survival steps
   `<out-prefix>.hstats_gender.csv`. No external R step is required.
 * **DeepSurv device**: `ckd_survival/src/train_deepsurv_time_to_{ckd,death}.py` auto-select
   `mps` > `cuda` > `cpu` at runtime; there's no CLI flag to override this.
+* **Fine-Gray Competing risk model**: The R code `ckd_survival/src/post_AKI_survival_analysis.Rmd` requires intermediate input data.
 ---
 
 ## 9) 📂 Source Tree (abridged)
@@ -238,6 +239,7 @@ ckd_survival/src/
   filter_upstream_exclusions.py
   incident_ckd_target.py
   pre_aki_lab_flags.py
+  post_AKI_survival_analysis.Rmd
   train_xgboost_time_to_ckd.py / train_xgboost_time_to_death.py
   train_deepsurv_time_to_ckd.py / train_deepsurv_time_to_death.py
   features/
