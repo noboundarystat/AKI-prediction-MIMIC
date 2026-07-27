@@ -306,6 +306,131 @@ def main():
 
     thr = 0.5
 
+    # Eval helper
+    def add_eval(mask=None, part_df=None, part_X=None):
+        if mask is not None:
+            Xp = X[mask]; yp = y[mask]
+        else:
+            Xp = part_X; yp = part_df[args.target].astype(int).values
+        scores = clf.predict_proba(Xp)[:, 1]
+        metrics = eval_split(yp, scores, threshold=thr)
+        return metrics, scores
+
+    # Collect metrics & predictions
+    results: Dict[str, dict] = {
+        "mode": args.mode,
+        "split_prevalence": {
+            "train_prev": prevalence(y[train_m]),
+            "val_prev":   prevalence(y[val_m]),
+            "test_prev":  prevalence(y[test_m]),
+        },
+        "thresholding": {"objective": args.threshold_objective, "target": args.threshold_target},
+        "model": {
+            "type": "XGBClassifier",
+            "params": tuned_params,
+            "seed": args.seed,
+            "impute": bool(args.impute),
+        },
+        "tuning": {
+            "enabled": bool(args.tune),
+            "metric": args.tune_metric
+        }
+    }
+
+    preds_frames = []
+    for name, mask in [("train", train_m), ("val", val_m), ("test", test_m)]:
+        m, scores = add_eval(mask=mask)
+        results[name] = m
+        out = dsplit.loc[mask, args.id_cols + [args.target]].copy()
+        out["split"] = name; out["prob"] = scores
+        preds_frames.append(out)
+
+    # External: full MIMIC-III (only for mimic4_only)
+    if args.mode == "mimic4_only" and args.dataset_col in df.columns:
+        df_m3 = df[df[args.dataset_col] == args.mimic3_value].copy()
+        df_m3 = df_m3[~df_m3[args.target].isna()]
+        if len(df_m3):
+            Xm3 = df_m3[feature_cols].copy()
+            if args.impute and imputer is not None:
+                Xm3 = pd.DataFrame(imputer.transform(Xm3), columns=feature_cols, index=Xm3.index)
+            m3_metrics, scores = add_eval(mask=None, part_df=df_m3, part_X=Xm3)
+            results["mimic3_full"] = m3_metrics
+            out = df_m3[args.id_cols + [args.target]].copy()
+            out["split"] = "mimic3_full"; out["prob"] = scores
+            preds_frames.append(out)
+
+    # Feature importance
+    fi = pd.Series(clf.feature_importances_, index=feature_cols).sort_values(ascending=False)
+    fi_df = fi.reset_index(); fi_df.columns = ["feature", "importance"]
+
+    # Outputs
+    out_prefix = Path(args.out_prefix)
+    out_prefix.parent.mkdir(parents=True, exist_ok=True)
+
+    # Save model + (optional) imputer
+    joblib.dump({"model": clf, "imputer": imputer, "features": feature_cols}, f"{args.out_prefix}.joblib")
+
+    # Splits keyed by IDs
+    split_arr = np.where(train_m, "train", np.where(val_m, "val", "test"))
+    split_df = dsplit.loc[:, args.id_cols].copy()
+    split_df["split"] = split_arr
+    split_df.to_csv(f"{args.out_prefix}.splits.csv", index=False)
+
+    # Features
+    Path(f"{args.out_prefix}.features.txt").write_text("\n".join(feature_cols))
+
+    # Meta
+    meta = {
+        "input": str(p),
+        "id_cols": args.id_cols,
+        "target": args.target,
+        "dataset_col": args.dataset_col,
+        "mimic3_value": args.mimic3_value,
+        "mimic4_value": args.mimic4_value,
+        "mode": args.mode,
+        "test_size": args.test_size,
+        "val_size": args.val_size,
+        "seed": args.seed,
+        "feature_count": len(feature_cols),
+        "features_path": f"{args.out_prefix}.features.txt",
+        "threshold_objective": args.threshold_objective,
+        "threshold_target": args.threshold_target,
+        "chosen_threshold": float(results["val"]["threshold"]),
+        "model": results["model"],
+        "excluded_columns": sorted(list(exclude)),
+        "tuning": results["tuning"],
+    }
+    Path(f"{args.out_prefix}.meta.json").write_text(json.dumps(meta, indent=2))
+
+    # Predictions & metrics
+    preds_df = pd.concat(preds_frames, axis=0, ignore_index=True)
+    preds_df.to_csv(f"{args.out_prefix}.predictions.csv", index=False)
+    Path(f"{args.out_prefix}.metrics.json").write_text(json.dumps(results, indent=2))
+    fi_df.to_csv(f"{args.out_prefix}.feature_importance.csv", index=False)
+
+    # Summary
+    lines = []
+    lines.append(f"# XGBoost Results ({args.mode})")
+    lines.append(f"- Features: {len(feature_cols)}")
+    lines.append(f"- Train prevalence: {results['split_prevalence']['train_prev']:.6f}")
+    lines.append(f"- Val prevalence:   {results['split_prevalence']['val_prev']:.6f}")
+    lines.append(f"- Test prevalence:  {results['split_prevalence']['test_prev']:.6f}")
+    lines.append(f"- Tuning: {results['tuning']}")
+    lines.append(f"- Threshold ({args.threshold_objective} target={args.threshold_target}): {results['val']['threshold']:.4f}")
+
+    def add_block(name, m):
+        lines.append(f"\n## {name.upper()}")
+        lines.append(f"- AUROC: {m['auroc']:.6f} | AUPRC: {m['auprc']:.6f}")
+        lines.append(f"- Sensitivity: {m['sensitivity']:.6f} | Specificity: {m['specificity']:.6f} | Precision: {m['precision']:.6f}")
+        lines.append(f"- Confusion matrix (rows=actual 0/1, cols=pred 0/1): {m['confusion_matrix']['matrix']}")
+        lines.append("```\n" + m["classification_report_text"] + "\n```")
+
+    for key in ["train", "val", "test"]:
+        add_block(key, results[key])
+    if "mimic3_full" in results: add_block("MIMIC-III (full external)", results["mimic3_full"])
+
+    Path(f"{args.out_prefix}.summary.txt").write_text("\n".join(lines))
+
     # --- H-stats ---
     try:
         h_df = compute_hstats_with_anchor(clf, X, anchor="dem_sex_F")
